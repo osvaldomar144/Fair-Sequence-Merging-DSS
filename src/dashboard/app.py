@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from flask import Flask, request, redirect, url_for, render_template_string, jsonify
 
@@ -16,7 +16,6 @@ from src.fairseq.runner import run_instance_trace
 APP_TITLE = "Fair Sequence – Dashboard"
 DEFAULT_RESULTS_DIR = Path("results/dashboard_runs")
 
-# In-memory task store (fine for thesis/demo). For persistence, write task state to disk.
 TASKS: Dict[str, Dict[str, Any]] = {}
 TASKS_LOCK = threading.Lock()
 
@@ -71,9 +70,126 @@ def create_app() -> Flask:
       .btn-dark { border-radius: 12px; }
       .form-control, .form-select { border-radius: 12px; }
       .shadow-soft { box-shadow: 0 6px 18px rgba(0,0,0,0.06); }
+      .kpi { font-size: 1.05rem; font-weight: 700; }
     </style>
     """
 
+    # --------------------------
+    # NEW: helpers for grid page
+    # --------------------------
+    def _read_grid_csv(out_dir: Path):
+        """
+        Read progressive CSV produced by scripts/run_grid.py:
+          raw_results.csv
+        Return: (df or None, error or None, meta dict)
+        """
+        try:
+            import pandas as pd  # local import (keeps app fast)
+        except Exception as e:
+            return None, f"pandas not available: {e!r}", {}
+
+        out_dir = Path(out_dir)
+        raw_path = out_dir / "raw_results.csv"
+        meta = {
+            "out_dir": str(out_dir),
+            "raw_path": str(raw_path),
+            "exists": raw_path.exists(),
+            "mtime": raw_path.stat().st_mtime if raw_path.exists() else None,
+            "size": raw_path.stat().st_size if raw_path.exists() else None,
+        }
+        if not raw_path.exists():
+            return None, None, meta
+
+        try:
+            df = pd.read_csv(raw_path)
+            # normalize column names if needed
+            # expected columns:
+            # class, instance, instance_name, algo, init, seed, time_limit_s,
+            # feasible, violation, max_avg_completion, sum_avg_completion, iters, elapsed_s
+            return df, None, meta
+        except Exception as e:
+            return None, f"failed reading CSV: {e!r}", meta
+
+    def _compute_grid_views(df):
+        """
+        df -> (kpis dict, combo_df, best_by_instance_df)
+        """
+        import pandas as pd
+
+        # safe casts
+        if "feasible" in df.columns:
+            df["feasible"] = df["feasible"].astype(bool)
+        if "violation" in df.columns:
+            df["violation"] = pd.to_numeric(df["violation"], errors="coerce").fillna(0.0)
+        if "max_avg_completion" in df.columns:
+            df["max_avg_completion"] = pd.to_numeric(df["max_avg_completion"], errors="coerce")
+        if "sum_avg_completion" in df.columns:
+            df["sum_avg_completion"] = pd.to_numeric(df["sum_avg_completion"], errors="coerce")
+
+        kpis = {
+            "n_rows": int(len(df)),
+            "n_instances": int(df[["class", "instance_name"]].drop_duplicates().shape[0]) if "instance_name" in df.columns else int(df["instance"].nunique()) if "instance" in df.columns else 0,
+            "n_families": int(df["class"].nunique()) if "class" in df.columns else 0,
+            "feasible_rate": float(df["feasible"].mean()) if "feasible" in df.columns and len(df) else 0.0,
+            "viol_mean": float(df["violation"].mean()) if "violation" in df.columns and len(df) else 0.0,
+            "time_limits": sorted([int(x) for x in df["time_limit_s"].dropna().unique().tolist()]) if "time_limit_s" in df.columns else [],
+            "seeds": sorted([int(x) for x in df["seed"].dropna().unique().tolist()]) if "seed" in df.columns else [],
+            "algos": sorted(df["algo"].dropna().unique().tolist()) if "algo" in df.columns else [],
+            "inits": sorted(df["init"].dropna().unique().tolist()) if "init" in df.columns else [],
+        }
+
+        # Summary by combo (algo, init, time_limit_s)
+        if set(["algo", "init", "time_limit_s"]).issubset(df.columns):
+            combo = df.groupby(["time_limit_s", "algo", "init"]).agg(
+                runs=("max_avg_completion", "count"),
+                feasible_rate=("feasible", "mean"),
+                viol_mean=("violation", "mean"),
+                viol_median=("violation", "median"),
+                maxavg_mean=("max_avg_completion", "mean"),
+                maxavg_median=("max_avg_completion", "median"),
+                sumavg_mean=("sum_avg_completion", "mean"),
+            ).reset_index()
+
+            # sort: prioritize feasible, low violation, low maxavg
+            combo = combo.sort_values(
+                ["time_limit_s", "feasible_rate", "viol_median", "maxavg_median"],
+                ascending=[True, False, True, True]
+            )
+        else:
+            combo = pd.DataFrame()
+
+        # Best by instance (per TL): pick best (algo, init) by:
+        # 1) higher feasible_rate, 2) lower median_violation, 3) lower median maxavg
+        if set(["class", "instance_name", "time_limit_s", "algo", "init"]).issubset(df.columns):
+            best_rows = []
+            for (fam, inst_name, tl), g in df.groupby(["class", "instance_name", "time_limit_s"]):
+                g2 = g.groupby(["algo", "init"]).agg(
+                    med=("max_avg_completion", "median"),
+                    feas=("feasible", "mean"),
+                    vmed=("violation", "median"),
+                ).reset_index()
+
+                g2 = g2.sort_values(["feas", "vmed", "med"], ascending=[False, True, True])
+                top = g2.iloc[0]
+                best_rows.append({
+                    "class": fam,
+                    "instance_name": inst_name,
+                    "time_limit_s": int(tl),
+                    "best_algo": top["algo"],
+                    "best_init": top["init"],
+                    "best_median_maxavg": float(top["med"]),
+                    "feasible_rate": float(top["feas"]),
+                    "median_violation": float(top["vmed"]),
+                })
+            best_by_instance = pd.DataFrame(best_rows).sort_values(["time_limit_s", "best_median_maxavg"])
+        else:
+            best_by_instance = pd.DataFrame()
+
+        return kpis, combo, best_by_instance
+
+    # --------------------------
+    # Home
+    # --------------------------
     @app.get("/")
     def index():
         data_root = request.args.get("data_root", "data")
@@ -88,10 +204,8 @@ def create_app() -> Flask:
         if inst is None and instances:
             inst = instances[0]
 
-        # Recent runs (from disk) — keep old behavior
         recent = []
         for jf in sorted(DEFAULT_RESULTS_DIR.glob("run_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:15]:
-            # skip folders run_<id>/
             if jf.is_dir():
                 continue
             try:
@@ -114,7 +228,10 @@ def create_app() -> Flask:
                 <h1 class="mb-1">{{{{title}}}}</h1>
                 <div class="small-muted">Lancia run controllate e visualizza curve best-so-far (live).</div>
               </div>
-              <a class="btn btn-outline-secondary" href="{{{{url_for('compare')}}}}">Compare</a>
+              <div class="d-flex gap-2">
+                <a class="btn btn-outline-secondary" href="{{{{url_for('grid_page')}}}}">Grid results</a>
+                <a class="btn btn-outline-secondary" href="{{{{url_for('compare')}}}}">Compare</a>
+              </div>
             </div>
 
             <div class="row g-3">
@@ -187,7 +304,7 @@ def create_app() -> Flask:
                   </form>
 
                   <div class="mt-3 small-muted">
-                    Suggerimento: per i test finali usa <span class="chip">180 / 300 / 600</span> secondi e più seed.
+                    Per i test finali userò <span class="chip">180 / 300 / 600</span> secondi.
                   </div>
                 </div>
               </div>
@@ -229,8 +346,8 @@ def create_app() -> Flask:
             </div>
 
             <div class="mt-3 small-muted">
-              Live: mentre una run è in corso, vengono aggiornati <span class="mono">progress.json</span> e <span class="mono">trace.ndjson</span> in
-              <span class="mono">results/dashboard_runs/run_&lt;run_id&gt;/</span>.
+              Osvaldo Alexis Hidalgo Martinez <br>
+              <strong>Matricola:</strong> 549484
             </div>
 
           </div>
@@ -248,6 +365,225 @@ def create_app() -> Flask:
             recent=recent,
         )
 
+    # --------------------------
+    # NEW: Grid results page
+    # --------------------------
+    @app.get("/grid")
+    def grid_page():
+        out_dir = request.args.get("out_dir", "results/grid_now_5min")
+        refresh_s = float(request.args.get("refresh_s", "10"))
+        out_dir_p = safe_path(out_dir)
+
+        df, err, meta = _read_grid_csv(out_dir_p)
+        kpis = {}
+        combo_rows = []
+        best_rows = []
+
+        if df is not None and err is None and len(df) > 0:
+            kpis, combo_df, best_df = _compute_grid_views(df)
+            combo_rows = combo_df.head(50).to_dict(orient="records") if len(combo_df) else []
+            best_rows = best_df.head(80).to_dict(orient="records") if len(best_df) else []
+
+        html = f"""
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8"/>
+          <title>Grid results</title>
+          {BOOTSTRAP_HEAD}
+          <script>
+            setTimeout(() => {{
+              const url = new URL(window.location.href);
+              const refreshS = Number(url.searchParams.get("refresh_s") || "{refresh_s}");
+              if (refreshS > 0) window.location.reload();
+            }}, {int(refresh_s*1000)});
+          </script>
+        </head>
+        <body>
+          <div class="container py-4">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <div>
+                <h1 class="mb-1">Grid results</h1>
+                <div class="small-muted">Legge <span class="mono">raw_results.csv</span> in modo progressivo (auto-refresh).</div>
+              </div>
+              <div class="d-flex gap-2">
+                <a class="btn btn-outline-secondary" href="{{{{url_for('index')}}}}">Home</a>
+                <a class="btn btn-outline-secondary" href="{{{{url_for('compare')}}}}">Compare</a>
+              </div>
+            </div>
+
+            <div class="card p-3 mb-3">
+              <form method="get" action="{{{{url_for('grid_page')}}}}">
+                <div class="row g-2 align-items-end">
+                  <div class="col-md-7">
+                    <label class="form-label small-muted mb-1">Out dir (run_grid.py)</label>
+                    <input class="form-control mono" name="out_dir" value="{{{{out_dir}}}}" />
+                    <div class="small-muted mt-1">Esempio: <span class="mono">results/grid_now_5min</span></div>
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label small-muted mb-1">Auto-refresh (sec)</label>
+                    <input class="form-control mono" name="refresh_s" type="number" min="0" step="1" value="{{{{refresh_s}}}}" />
+                    <div class="small-muted mt-1">0 = off</div>
+                  </div>
+                  <div class="col-md-2 d-grid">
+                    <button class="btn btn-dark" type="submit">Apri</button>
+                  </div>
+                </div>
+              </form>
+            </div>
+
+            <div class="row g-3">
+              <div class="col-lg-4">
+                <div class="card p-3">
+                  <h5 class="mb-2">Stato</h5>
+                  <div class="small-muted">out_dir: <span class="mono">{{{{meta.out_dir}}}}</span></div>
+                  <div class="small-muted">raw_results.csv: <span class="mono">{{{{meta.raw_path}}}}</span></div>
+                  <div class="small-muted">exists: <span class="mono">{{{{meta.exists}}}}</span></div>
+                  <div class="small-muted">size: <span class="mono">{{{{meta.size}}}}</span></div>
+                  <div class="small-muted">mtime: <span class="mono">{{{{meta.mtime_readable}}}}</span></div>
+
+                  {{% if err %}}
+                    <div class="alert alert-danger mt-2 mb-0"><b>Errore:</b> {{{{err}}}}</div>
+                  {{% endif %}}
+                  {{% if not meta.exists %}}
+                    <div class="alert alert-warning mt-2 mb-0">File non trovato. Avvia run_grid.py o controlla l’out_dir.</div>
+                  {{% endif %}}
+                </div>
+
+                <div class="card p-3 mt-3">
+                  <h5 class="mb-2">KPI (parziali)</h5>
+                  {{% if kpis %}}
+                    <div class="row g-2">
+                      <div class="col-6"><div class="small-muted">righe</div><div class="kpi mono">{{{{kpis.n_rows}}}}</div></div>
+                      <div class="col-6"><div class="small-muted">istanze</div><div class="kpi mono">{{{{kpis.n_instances}}}}</div></div>
+                      <div class="col-6"><div class="small-muted">famiglie</div><div class="kpi mono">{{{{kpis.n_families}}}}</div></div>
+                      <div class="col-6"><div class="small-muted">feasible rate</div><div class="kpi mono">{{{{"%.2f"|format(100*kpis.feasible_rate)}}}}%</div></div>
+                      <div class="col-12"><div class="small-muted">viol mean</div><div class="kpi mono">{{{{"%.3f"|format(kpis.viol_mean)}}}}</div></div>
+                    </div>
+                  {{% else %}}
+                    <div class="small-muted">In attesa di righe nel CSV…</div>
+                  {{% endif %}}
+                </div>
+              </div>
+
+              <div class="col-lg-8">
+                <div class="card p-3 mb-3">
+                  <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Ranking per combinazione (TL, algo, init)</h5>
+                    <span class="small-muted">top 50</span>
+                  </div>
+
+                  {{% if combo_rows %}}
+                    <div class="table-responsive mt-2">
+                      <table class="table table-sm align-middle mb-0">
+                        <thead>
+                          <tr>
+                            <th>TL</th><th>Algo</th><th>Init</th><th>#</th><th>Feas%</th><th>Viol med</th><th>MaxAvg med</th><th>MaxAvg mean</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {{% for r in combo_rows %}}
+                            <tr>
+                              <td class="mono">{{{{r.time_limit_s|int}}}}</td>
+                              <td><span class="chip mono">{{{{r.algo}}}}</span></td>
+                              <td><span class="chip mono">{{{{r.init}}}}</span></td>
+                              <td class="mono">{{{{r.runs|int}}}}</td>
+                              <td class="mono">{{{{"%.0f"|format(100*r.feasible_rate)}}}}%</td>
+                              <td class="mono">{{{{"%.3f"|format(r.viol_median)}}}}</td>
+                              <td class="mono">{{{{"%.4f"|format(r.maxavg_median)}}}}</td>
+                              <td class="mono">{{{{"%.4f"|format(r.maxavg_mean)}}}}</td>
+                            </tr>
+                          {{% endfor %}}
+                        </tbody>
+                      </table>
+                    </div>
+                  {{% else %}}
+                    <div class="small-muted mt-2">Nessun dato ancora.</div>
+                  {{% endif %}}
+                </div>
+
+                <div class="card p-3">
+                  <div class="d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Best per istanza (per TL)</h5>
+                    <span class="small-muted">top 80</span>
+                  </div>
+
+                  {{% if best_rows %}}
+                    <div class="table-responsive mt-2">
+                      <table class="table table-sm align-middle mb-0">
+                        <thead>
+                          <tr>
+                            <th>Fam</th><th>Inst</th><th>TL</th><th>Best algo</th><th>Best init</th><th>Feas%</th><th>Viol med</th><th>MaxAvg med</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {{% for r in best_rows %}}
+                            <tr>
+                              <td class="mono">{{{{r["class"]}}}}</td>
+                              <td class="mono">{{{{r["instance_name"]}}}}</td>
+                              <td class="mono">{{{{r["time_limit_s"]}}}}</td>
+                              <td><span class="chip mono">{{{{r["best_algo"]}}}}</span></td>
+                              <td><span class="chip mono">{{{{r["best_init"]}}}}</span></td>
+                              <td class="mono">{{{{"%.0f"|format(100*r["feasible_rate"])}}}}%</td>
+                              <td class="mono">{{{{"%.3f"|format(r["median_violation"])}}}}</td>
+                              <td class="mono">{{{{"%.4f"|format(r["best_median_maxavg"])}}}}</td>
+                            </tr>
+                          {{% endfor %}}
+                        </tbody>
+                      </table>
+                    </div>
+                  {{% else %}}
+                    <div class="small-muted mt-2">Nessun dato ancora.</div>
+                  {{% endif %}}
+                </div>
+
+              </div>
+            </div>
+          </div>
+        </body>
+        </html>
+        """
+
+        # render meta as an object-like dict for jinja
+        meta_for_tpl = {
+            "out_dir": meta.get("out_dir", ""),
+            "raw_path": meta.get("raw_path", ""),
+            "exists": bool(meta.get("exists", False)),
+            "size": meta.get("size", ""),
+            "mtime_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(meta["mtime"])) if meta.get("mtime") else "",
+        }
+
+        return render_template_string(
+            html,
+            out_dir=out_dir,
+            refresh_s=refresh_s,
+            meta=meta_for_tpl,
+            err=err,
+            kpis=kpis,
+            combo_rows=combo_rows,
+            best_rows=best_rows,
+        )
+
+    # Optional: API endpoint (se ti serve in futuro per polling più “smart”)
+    @app.get("/api/grid_status")
+    def grid_status_api():
+        out_dir = request.args.get("out_dir", "results/grid_now_5min")
+        out_dir_p = safe_path(out_dir)
+        df, err, meta = _read_grid_csv(out_dir_p)
+        if df is None or err is not None or len(df) == 0:
+            return jsonify({"ok": False, "error": err, "meta": meta, "n_rows": 0})
+        kpis, combo_df, best_df = _compute_grid_views(df)
+        return jsonify({
+            "ok": True,
+            "meta": meta,
+            "kpis": kpis,
+            "combo_top": combo_df.head(20).to_dict(orient="records") if len(combo_df) else [],
+            "best_by_instance_top": best_df.head(20).to_dict(orient="records") if len(best_df) else [],
+        })
+
+    # --------------------------
+    # Existing: start live run
+    # --------------------------
     @app.post("/start")
     def start_run():
         data_root = request.form.get("data_root", "data")
@@ -288,12 +624,10 @@ def create_app() -> Flask:
             with TASKS_LOCK:
                 TASKS[task_id]["status"] = "running"
 
-            # live-run folder
             run_dir = DEFAULT_RESULTS_DIR / f"run_{run_id}"
             progress_path = run_dir / "progress.json"
             trace_path = run_dir / "trace.ndjson"
 
-            # initial progress
             _atomic_write_json(progress_path, {
                 "run_id": run_id,
                 "status": "running",
@@ -318,10 +652,9 @@ def create_app() -> Flask:
                         "sum_avg_completion": float(sum_avg),
                         "obj": float(obj),
                     }
-                    # 1) append to NDJSON
+
                     _append_ndjson(trace_path, p)
 
-                    # 2) keep last ~2000 points in memory for live chart
                     with TASKS_LOCK:
                         tr = TASKS[task_id].get("trace", [])
                         tr.append(p)
@@ -329,7 +662,6 @@ def create_app() -> Flask:
                             tr[:] = tr[-2000:]
                         TASKS[task_id]["trace"] = tr
 
-                    # 3) atomic progress update
                     _atomic_write_json(progress_path, {
                         "run_id": run_id,
                         "status": "running",
@@ -350,8 +682,7 @@ def create_app() -> Flask:
                         }
                     })
 
-                # IMPORTANT: requires runner.py updated with external_recorder support
-                res, trace = run_instance_trace(
+                res, trace, diagnostics = run_instance_trace(
                     Path(instance_dir),
                     algo=algo,
                     time_limit_s=time_limit_s,
@@ -359,7 +690,8 @@ def create_app() -> Flask:
                     init_method=init_method,
                     log_every_s=log_every_s,
                     verbose=False,
-                    external_recorder=live_recorder,  # <-- new
+                    external_recorder=live_recorder,
+                    return_diagnostics=True,
                 )
 
                 ended = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -380,13 +712,12 @@ def create_app() -> Flask:
                     "n_iters": res.n_iters,
                     "elapsed_s": res.elapsed_s,
                     "trace": trace,
+                    "diagnostics": diagnostics,
                 }
 
-                # persist "single JSON" for recent runs list
                 out = DEFAULT_RESULTS_DIR / f"run_{run_id}.json"
                 out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-                # final progress
                 _atomic_write_json(progress_path, {
                     "run_id": run_id,
                     "status": "done",
@@ -414,7 +745,8 @@ def create_app() -> Flask:
                 with TASKS_LOCK:
                     TASKS[task_id]["status"] = "done"
                     TASKS[task_id]["ended_at"] = ended
-                    TASKS[task_id]["trace"] = trace  # full trace at end
+                    TASKS[task_id]["trace"] = trace
+                    TASKS[task_id]["diagnostics"] = diagnostics
                     TASKS[task_id]["result"] = asdict(res)
 
             except Exception as e:
@@ -433,6 +765,9 @@ def create_app() -> Flask:
         threading.Thread(target=worker, daemon=True).start()
         return redirect(url_for("task_page", task_id=task_id))
 
+    # --------------------------
+    # Existing: task page + api
+    # --------------------------
     @app.get("/task/<task_id>")
     def task_page(task_id: str):
         html = f"""
@@ -453,6 +788,7 @@ def create_app() -> Flask:
               </div>
               <div class="d-flex gap-2">
                 <a class="btn btn-outline-secondary" href="{{{{url_for('index')}}}}">Home</a>
+                <a class="btn btn-outline-secondary" href="{{{{url_for('grid_page')}}}}">Grid results</a>
                 <a class="btn btn-outline-secondary" href="{{{{url_for('compare')}}}}">Compare</a>
               </div>
             </div>
@@ -489,7 +825,6 @@ def create_app() -> Flask:
           </div>
 
           <script>
-            const taskId = "{{{{task_id}}}}";
             const ctx = document.getElementById('chart');
             const chart = new Chart(ctx, {{
               type: 'line',
@@ -572,7 +907,6 @@ def create_app() -> Flask:
             if not t:
                 return jsonify({"error": "task not found"}), 404
 
-            # return lightweight payload for live
             trace = t.get("trace", [])
             lite_trace = [{"t": p["t"], "max_avg_completion": p["max_avg_completion"]} for p in trace]
 
@@ -586,10 +920,14 @@ def create_app() -> Flask:
                 "time_limit_s": t["time_limit_s"],
                 "seed": t["seed"],
                 "trace": lite_trace,
+                "diagnostics": t.get("diagnostics"),
                 "final": t.get("result"),
                 "error": t.get("error"),
             })
 
+    # --------------------------
+    # Existing: view run
+    # --------------------------
     @app.get("/run/<run_id>")
     def view_run(run_id: str):
         jf = DEFAULT_RESULTS_DIR / f"run_{run_id}.json"
@@ -615,6 +953,7 @@ def create_app() -> Flask:
               </div>
               <div class="d-flex gap-2">
                 <a class="btn btn-outline-secondary" href="{{{{url_for('index')}}}}">Home</a>
+                <a class="btn btn-outline-secondary" href="{{{{url_for('grid_page')}}}}">Grid results</a>
                 <a class="btn btn-outline-secondary" href="{{{{url_for('compare')}}}}">Compare</a>
               </div>
             </div>
@@ -689,9 +1028,11 @@ def create_app() -> Flask:
             payload=json.dumps(data, indent=2),
         )
 
+    # --------------------------
+    # Existing: compare
+    # --------------------------
     @app.get("/compare")
     def compare():
-        # Load all saved dashboard runs
         runs = []
         for jf in sorted(DEFAULT_RESULTS_DIR.glob("run_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             if jf.is_dir():
@@ -701,7 +1042,6 @@ def create_app() -> Flask:
             except Exception:
                 continue
 
-        # Simple pivot: best median per (algo, init, time_limit_s) across saved runs
         key_runs = {}
         for r in runs:
             k = (r.get("algo"), r.get("init"), int(r.get("time_limit_s", 0)))
@@ -740,7 +1080,10 @@ def create_app() -> Flask:
                 <h1 class="mb-1">Compare</h1>
                 <div class="small-muted">Aggregazione sulle run salvate dalla dashboard (utile per demo).</div>
               </div>
-              <a class="btn btn-outline-secondary" href="{{{{url_for('index')}}}}">Home</a>
+              <div class="d-flex gap-2">
+                <a class="btn btn-outline-secondary" href="{{{{url_for('index')}}}}">Home</a>
+                <a class="btn btn-outline-secondary" href="{{{{url_for('grid_page')}}}}">Grid results</a>
+              </div>
             </div>
 
             <div class="card p-3 mb-3">

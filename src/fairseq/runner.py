@@ -1,8 +1,10 @@
 from __future__ import annotations
-
+from dataclasses import asdict
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
+import time
 import pandas as pd
+import numpy as np
 
 from src.fairseq.io import load_instance
 from src.fairseq.algorithms import solve, AlgoResult
@@ -25,6 +27,30 @@ def run_instance(instance_dir: Path, algo: str, time_limit_s: int, seed: int, in
     return res
 
 
+def _build_diagnostics(inst, sol, ev) -> Dict[str, Any]:
+    """Extra info for human-friendly interpretation (does not affect algorithms)."""
+    avg_by_agent = ev.avg_by_agent
+    worst_idx = int(np.argmax(avg_by_agent)) if len(avg_by_agent) else -1
+    worst_avg = float(avg_by_agent[worst_idx]) if worst_idx >= 0 else 0.0
+
+    # counts distribution of worst agent over slots
+    worst_counts = sol.counts[worst_idx].astype(int).tolist() if worst_idx >= 0 else []
+    # slot usage / slack
+    slot_loads = ev.slot_loads.astype(float).tolist()
+    capacities = inst.capacities.astype(float).tolist()
+    slot_slack = (inst.capacities - ev.slot_loads).astype(float).tolist()
+
+    return {
+        "avg_by_agent": [float(x) for x in avg_by_agent.tolist()],
+        "worst_agent_idx": worst_idx,
+        "worst_agent_avg_completion": worst_avg,
+        "worst_agent_counts_by_slot": worst_counts,
+        "slot_loads": slot_loads,
+        "slot_capacities": capacities,
+        "slot_slack": slot_slack,
+    }
+
+
 def run_instance_trace(
     instance_dir: Path,
     algo: str,
@@ -34,15 +60,18 @@ def run_instance_trace(
     log_every_s: float = 1.0,
     verbose: bool = False,
     external_recorder: Optional[Callable[[float, float, float, float], None]] = None,
-):
+    return_diagnostics: bool = False,
+) -> Tuple:
     """
     Run a single instance and record best-so-far trace for dashboard/plots.
 
-    Returns: (AlgoResult, trace)
-      trace: list of dicts with keys: t, max_avg_completion, sum_avg_completion, obj
+    Returns:
+      if return_diagnostics=False:
+        (AlgoResult, trace)
+      else:
+        (AlgoResult, trace, diagnostics)
 
-    If external_recorder is provided, it is called on every recorded point:
-      external_recorder(t, max_avg_completion, sum_avg_completion, obj)
+    trace item keys: t, max_avg_completion, sum_avg_completion, obj
     """
     inst = load_instance(instance_dir)
     trace: List[Dict[str, float]] = []
@@ -58,7 +87,7 @@ def run_instance_trace(
         if external_recorder is not None:
             external_recorder(p["t"], p["max_avg_completion"], p["sum_avg_completion"], p["obj"])
 
-    _, res = solve(
+    sol, res = solve(
         inst,
         algo=algo,
         init_method=init_method,
@@ -68,18 +97,16 @@ def run_instance_trace(
         recorder=recorder,
         log_every_s=log_every_s,
     )
-    return res, trace
+
+    if not return_diagnostics:
+        return res, trace
+
+    ev = evaluate(inst, sol)
+    diagnostics = _build_diagnostics(inst, sol, ev)
+    return res, trace, diagnostics
 
 
-def run_batch(
-    data_root: Path,
-    out_dir: Path,
-    algos: List[str],
-    time_limits: List[int],
-    seeds: List[int],
-    init_method: str,
-    verbose: bool = False,
-):
+def run_batch(data_root: Path, out_dir: Path, algos: List[str], time_limits: List[int], seeds: List[int], init_method: str, verbose: bool = False):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
