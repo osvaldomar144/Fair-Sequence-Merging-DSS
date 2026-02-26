@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block subtitle %}Stub temporaneo: nel prossimo step lo trasformiamo in “Specific summary”.{% endblock %}
+{% block topnav %}
+<a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Home</a>
+<a class="btn btn-outline-secondary" href="{{ url_for('queue_page') }}">Queue</a>
+{% endblock %}
+
+{% block content %}
+<div class="card p-3">
+  <h5 class="mb-2">Grid results (stub)</h5>
+  <div class="small-muted">
+    out_dir: <span class="mono">{{ out_dir }}</span><br/>
+    refresh_s: <span class="mono">{{ refresh_s }}</span><br/><br/>
+    Nel prossimo step qui aggiungiamo:
+    selezione istanze + esecuzione massiva + tabella riepilogativa stile screenshot.
+  </div>
+</div>
+{% endblock %}

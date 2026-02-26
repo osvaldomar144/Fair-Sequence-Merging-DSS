@@ -1,0 +1,109 @@
+/* Background */
+body {
+  background: #f6f7fb;
+}
+
+/* Navbar */
+.app-nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(255,255,255,0.86);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+
+.app-nav-inner {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+}
+
+.app-brand .app-title {
+  font-size: 2rem;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: #111827;
+}
+
+.app-brand .app-subtitle {
+  color: #6b7280;
+  font-size: 0.95rem;
+  margin-top: 4px;
+}
+
+.app-menu {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.app-link {
+  text-decoration: none;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(0,0,0,0.14);
+  color: #374151;
+  background: #fff;
+  transition: transform .05s ease, background .15s ease, border-color .15s ease;
+}
+
+.app-link:hover {
+  background: #f3f4f6;
+  border-color: rgba(0,0,0,0.18);
+}
+
+.container {
+  max-width: 1180px;
+}
+
+/* Cards */
+.card {
+  border: 0;
+  border-radius: 18px;
+  box-shadow: 0 8px 22px rgba(0,0,0,0.06);
+}
+
+.small-muted {
+  color: #6b7280;
+  font-size: 0.92rem;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/* Pills */
+.chip {
+  display: inline-block;
+  padding: .22rem .6rem;
+  border-radius: 999px;
+  font-size: .85rem;
+  background: #eef1ff;
+}
+
+/* Inputs */
+.form-control, .form-select {
+  border-radius: 14px;
+}
+
+/* Buttons */
+.btn-dark {
+  border-radius: 14px;
+}
+
+.btn-outline-dark,
+.btn-outline-secondary {
+  border-radius: 14px;
+}
+
+/* KPI */
+.kpi {
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: #111827;
+}

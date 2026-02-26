@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block subtitle %}Aggregazione sulle run salvate dalla dashboard (utile per demo).{% endblock %}
+{% block topnav %}
+<a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Home</a>
+<a class="btn btn-outline-secondary" href="{{ url_for('queue_page') }}">Queue</a>
+{% endblock %}
+
+{% block content %}
+<div class="card p-3 mb-3">
+  <h5 class="mb-1">Classifica (mediana) per combinazione</h5>
+  <div class="small-muted mb-2">Per l’analisi “ufficiale” useremo lo “specific summary”.</div>
+
+  {% if summary %}
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead>
+          <tr>
+            <th>TL (s)</th><th>Algo</th><th>Init</th><th>#run</th><th>Median best max-avg</th><th>Mean best max-avg</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in summary %}
+            <tr>
+              <td class="mono">{{ s.time_limit_s }}</td>
+              <td><span class="chip mono">{{ s.algo }}</span></td>
+              <td><span class="chip mono">{{ s.init }}</span></td>
+              <td class="mono">{{ s.runs }}</td>
+              <td class="mono">{{ "%.4f"|format(s.median_best_maxavg) }}</td>
+              <td class="mono">{{ "%.4f"|format(s.mean_best_maxavg) }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="small-muted">Nessuna run salvata ancora.</div>
+  {% endif %}
+</div>
+
+<div class="card p-3">
+  <h5 class="mb-2">Run salvate (ultime)</h5>
+  {% if runs %}
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead>
+          <tr>
+            <th>Quando</th><th>Algo</th><th>Init</th><th>TL</th><th>Best max-avg</th><th>Istanza</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in runs %}
+            <tr>
+              <td class="small-muted">{{ r.ended_at }}</td>
+              <td><span class="chip mono">{{ r.algo }}</span></td>
+              <td><span class="chip mono">{{ r.init }}</span></td>
+              <td class="mono">{{ r.time_limit_s }}</td>
+              <td class="mono">{{ "%.4f"|format(r.best_max_avg_completion) }}</td>
+              <td class="small-muted mono">{{ r.instance_dir }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="small-muted">Nessuna run.</div>
+  {% endif %}
+</div>
+{% endblock %}

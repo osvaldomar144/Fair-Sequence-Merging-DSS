@@ -104,6 +104,56 @@ def select_instances(
 
 
 # -----------------------------
+# Worker (picklable): one job -> one row
+# -----------------------------
+def _run_one(job: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    job keys:
+      class, instance_dir, instance_name, algo, init, seed, time_limit_s
+    returns:
+      row dict compatible with raw_results.csv
+    """
+    fam = job["class"]
+    inst_dir = Path(job["instance_dir"])
+    inst_name = job["instance_name"]
+    algo = job["algo"]
+    init_m = job["init"]
+    tl = int(job["time_limit_s"])
+    seed = int(job["seed"])
+
+    inst = load_instance(inst_dir)
+
+    t0 = time.time()
+    sol, res = solve(
+        inst,
+        algo=algo,
+        init_method=init_m,
+        seed=seed,
+        time_limit_s=tl,
+        verbose=False,
+    )
+    ev = evaluate(inst, sol)
+    dur = time.time() - t0
+
+    return {
+        "class": fam,
+        "instance": inst_dir.as_posix(),
+        "instance_name": inst_name,
+        "algo": algo,
+        "init": init_m,
+        "seed": seed,
+        "time_limit_s": tl,
+        "feasible": bool(ev.feasible),
+        "violation": float(ev.violation),
+        "max_avg_completion": float(ev.max_avg_completion),
+        "sum_avg_completion": float(ev.sum_avg_completion),
+        "iters": int(res.n_iters),
+        "elapsed_s": float(res.elapsed_s),
+        "_wall_s": float(dur),  # internal for ETA (not written if you don't want it)
+    }
+
+
+# -----------------------------
 # Main
 # -----------------------------
 def main():
@@ -122,9 +172,12 @@ def main():
     ap.add_argument("--time-limit-s", type=int, default=180, help="Single time limit in seconds (e.g., 180 for 3min)")
     ap.add_argument("--seed", type=int, default=1, help="Single seed")
 
+    # NEW: parallelism
+    ap.add_argument("--workers", type=int, default=1, help="Parallel workers (processes). 1=sequential")
+
     # resume & logs
     ap.add_argument("--resume", action="store_true", help="Resume if raw_results.csv exists (skip completed rows)")
-    ap.add_argument("--verbose", action="store_true", help="Print START/DONE logs for each run")
+    ap.add_argument("--verbose", action="store_true", help="Print START/DONE logs for each completed run")
     ap.add_argument("--heartbeat-s", type=float, default=30.0, help="Heartbeat every N seconds")
     ap.add_argument("--flush-every", type=int, default=20, help="Flush CSV buffer every N rows")
 
@@ -150,7 +203,7 @@ def main():
             ok, _ = is_init_allowed(algo, init_m)
             if ok:
                 combos.append((algo, init_m))
-    # stable column order: by init then algo (more readable)
+    # stable column order: by init then algo
     combos.sort(key=lambda x: (x[1], x[0]))
 
     instances = select_instances(
@@ -174,6 +227,7 @@ def main():
     if exclude:
         print(f" - excluded families: {exclude}")
     print(f" - combos: {len(combos)}  (GA excludes round_robin)")
+    print(f" - workers: {args.workers}")
 
     # resume
     done_keys = set()
@@ -200,41 +254,54 @@ def main():
     rows_buffer: List[Dict[str, Any]] = []
     started = time.time()
     last_heartbeat = time.time()
-    completed_times: List[float] = []
+    completed_wall: List[float] = []
     skipped = 0
     done = 0
-    total_runs = len(instances) * len(combos)
-    current_desc = "N/A"
 
-    def flush():
-        nonlocal rows_buffer
-        if rows_buffer:
-            pd.DataFrame(rows_buffer).to_csv(raw_path, mode="a", header=False, index=False)
-            rows_buffer.clear()
-
+    # build jobs list (skip already done)
+    jobs: List[Dict[str, Any]] = []
     for fam, inst_dir in instances:
-        inst = load_instance(inst_dir)
         inst_name = inst_dir.name
-
         for algo, init_m in combos:
             key = (fam, inst_name, algo, init_m, tl, seed)
             if key in done_keys:
                 skipped += 1
                 continue
+            jobs.append({
+                "class": fam,
+                "instance_dir": inst_dir.as_posix(),
+                "instance_name": inst_name,
+                "algo": algo,
+                "init": init_m,
+                "seed": seed,
+                "time_limit_s": tl,
+            })
 
-            current_desc = f"{fam}/{inst_name} algo={algo} init={init_m} TL={tl}s seed={seed}"
+    total_runs = skipped + len(jobs)
+    print(f" - scheduled jobs: {len(jobs)}  skipped: {skipped}  total: {total_runs}")
 
-            # heartbeat (also flushes)
+    def flush():
+        nonlocal rows_buffer
+        if rows_buffer:
+            # drop internal fields
+            dfw = pd.DataFrame(rows_buffer)
+            if "_wall_s" in dfw.columns:
+                dfw = dfw.drop(columns=["_wall_s"])
+            dfw.to_csv(raw_path, mode="a", header=False, index=False)
+            rows_buffer.clear()
+
+    # sequential path
+    if args.workers <= 1:
+        for job in jobs:
+            current_desc = f'{job["class"]}/{job["instance_name"]} algo={job["algo"]} init={job["init"]} TL={tl}s seed={seed}'
             now = time.time()
             if now - last_heartbeat >= args.heartbeat_s:
                 done_all = skipped + done
-                avg = (sum(completed_times) / len(completed_times)) if completed_times else None
+                avg = (sum(completed_wall) / len(completed_wall)) if completed_wall else None
+                eta_str = "n/a"
                 if avg is not None:
                     remaining = max(0, total_runs - done_all)
-                    eta_s = remaining * avg
-                    eta_str = f"{eta_s/60:.1f} min"
-                else:
-                    eta_str = "n/a"
+                    eta_str = f"{(remaining * avg) / 60:.1f} min"
                 print(f"[heartbeat] done={done_all}/{total_runs} current={current_desc} ETA~{eta_str}")
                 last_heartbeat = now
                 flush()
@@ -242,35 +309,9 @@ def main():
             if args.verbose:
                 print(f"[START] {current_desc}")
 
-            t0 = time.time()
-            sol, res = solve(
-                inst,
-                algo=algo,
-                init_method=init_m,
-                seed=seed,
-                time_limit_s=tl,
-                verbose=False,
-            )
-            ev = evaluate(inst, sol)
-            dur = time.time() - t0
-            completed_times.append(dur)
+            row = _run_one(job)
+            completed_wall.append(float(row.get("_wall_s", tl)))
             done += 1
-
-            row = {
-                "class": fam,
-                "instance": inst_dir.as_posix(),
-                "instance_name": inst_name,
-                "algo": algo,
-                "init": init_m,
-                "seed": seed,
-                "time_limit_s": tl,
-                "feasible": bool(ev.feasible),
-                "violation": float(ev.violation),
-                "max_avg_completion": float(ev.max_avg_completion),
-                "sum_avg_completion": float(ev.sum_avg_completion),
-                "iters": int(res.n_iters),
-                "elapsed_s": float(res.elapsed_s),
-            }
             rows_buffer.append(row)
 
             if len(rows_buffer) >= args.flush_every:
@@ -278,18 +319,57 @@ def main():
 
             if args.verbose:
                 print(
-                    f"[DONE ] {current_desc} dur={dur:.1f}s "
-                    f"feasible={ev.feasible} viol={ev.violation:.3f} maxavg={ev.max_avg_completion:.4f}"
+                    f"[DONE ] {current_desc} "
+                    f"wall={row.get('_wall_s', 0.0):.1f}s feasible={row['feasible']} "
+                    f"viol={row['violation']:.3f} maxavg={row['max_avg_completion']:.4f}"
                 )
 
             if done % 10 == 0:
                 elapsed = time.time() - started
-                avg = sum(completed_times) / max(1, len(completed_times))
+                avg = sum(completed_wall) / max(1, len(completed_wall))
                 remaining = max(0, total_runs - (skipped + done))
                 eta_s = remaining * avg
                 print(f"[{skipped+done}/{total_runs}] avg_run={avg:.1f}s ETA~{eta_s/60:.1f} min (elapsed {elapsed/60:.1f} min)")
 
-    flush()
+        flush()
+
+    # parallel path
+    else:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        with ProcessPoolExecutor(max_workers=max(1, args.workers)) as ex:
+            futures = [ex.submit(_run_one, j) for j in jobs]
+
+            for fut in as_completed(futures):
+                row = fut.result()
+                done += 1
+                completed_wall.append(float(row.get("_wall_s", tl)))
+                rows_buffer.append(row)
+
+                if args.verbose:
+                    desc = f'{row["class"]}/{row["instance_name"]} algo={row["algo"]} init={row["init"]} TL={row["time_limit_s"]}s seed={row["seed"]}'
+                    print(
+                        f"[DONE ] {desc} "
+                        f"wall={row.get('_wall_s', 0.0):.1f}s feasible={row['feasible']} "
+                        f"viol={row['violation']:.3f} maxavg={row['max_avg_completion']:.4f}"
+                    )
+
+                if len(rows_buffer) >= args.flush_every:
+                    flush()
+
+                now = time.time()
+                if now - last_heartbeat >= args.heartbeat_s:
+                    done_all = skipped + done
+                    avg = (sum(completed_wall) / len(completed_wall)) if completed_wall else None
+                    eta_str = "n/a"
+                    if avg is not None:
+                        remaining = max(0, total_runs - done_all)
+                        eta_str = f"{(remaining * avg) / 60:.1f} min"
+                    print(f"[heartbeat] done={done_all}/{total_runs} workers={args.workers} ETA~{eta_str}")
+                    last_heartbeat = now
+                    flush()
+
+        flush()
 
     print(f"Done. Wrote raw: {raw_path}")
 
@@ -330,13 +410,10 @@ def main():
     ordered_labels = [combo_label(algo, init_m) for (algo, init_m) in combos]
     pivot = pivot.reindex(columns=[c for c in ordered_labels if c in pivot.columns])
 
-    # nice formatting for CSV: keep numeric (dashboard can format)
     pivot_out = pivot.reset_index()
-
     pivot_out.to_csv(summary_csv_path, index=False)
     print(f"Wrote: {summary_csv_path}")
 
-    # JSON for dashboard (rows list + columns list)
     summary_payload = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "data_root": str(data_root),
@@ -345,6 +422,7 @@ def main():
         "seed": seed,
         "selected_classes": classes or "ALL",
         "selected_instance_ids": instance_ids,
+        "workers": int(args.workers),
         "combos": [{"algo": a, "init": i, "key": combo_key(a, i), "label": combo_label(a, i)} for (a, i) in combos],
         "kpi": {
             "n_rows_raw": int(len(df)),

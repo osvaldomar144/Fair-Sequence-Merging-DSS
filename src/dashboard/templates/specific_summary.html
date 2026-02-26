@@ -1,0 +1,264 @@
+{% extends "base.html" %}
+
+{% block subtitle %}
+<small>Osvaldo Alexis Hidalgo Martinez</small><br>
+<small><strong>Matricola: </strong>549484</small>
+{% endblock %}
+
+{% block head %}
+<style>
+  /* Page-specific improvements (kept local to this page) */
+  .summary-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  /* Full-width, horizontal scroll when needed */
+  .table-wrap {
+    width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-radius: 12px;
+    border: 1px solid rgba(0,0,0,0.06);
+    background: #fff;
+  }
+
+  /* Make table compact but readable */
+  table.summary-table {
+    border-collapse: separate;
+    border-spacing: 0;
+    min-width: 980px; /* allow breathing room for many columns */
+    width: max-content; /* content-driven width */
+  }
+
+  table.summary-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: #f8f9fb;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+    font-weight: 700;
+    padding: 10px 12px;
+    vertical-align: bottom;
+    white-space: normal;          /* allow wrapping */
+    word-break: break-word;       /* wrap long words */
+    overflow-wrap: anywhere;
+    line-height: 1.15;
+    font-size: 0.92rem;
+  }
+
+  /* First column sticky (CLASSE) */
+  table.summary-table th.sticky-col,
+  table.summary-table td.sticky-col {
+    position: sticky;
+    left: 0;
+    z-index: 4;
+    background: #ffffff;
+    border-right: 1px solid rgba(0,0,0,0.06);
+  }
+
+  /* When header + sticky col overlap, header should win */
+  table.summary-table thead th.sticky-col {
+    z-index: 5;
+    background: #f8f9fb;
+  }
+
+  table.summary-table tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    vertical-align: middle;
+    white-space: nowrap; /* keep numbers aligned */
+    font-size: 0.95rem;
+  }
+
+  table.summary-table tbody tr:hover td {
+    background: #fafbff;
+  }
+
+  /* Slightly emphasize the class cells */
+  .class-cell {
+    font-weight: 800;
+    letter-spacing: 0.2px;
+  }
+
+  /* Column headers: give them a max width so they wrap nicely */
+  .colhead {
+    max-width: 220px; /* wraps long "Inizializzazione... Meta-euristica..." */
+  }
+
+  /* Make the table card truly full width regardless of sidebar ideas */
+  .full-width-card {
+    width: 100%;
+  }
+
+  /* Small badges for meta */
+  .meta-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .5rem .75rem;
+  }
+  @media (min-width: 992px) {
+    .meta-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+  .meta-item .label {
+    color: #6c757d;
+    font-size: .85rem;
+  }
+  .meta-item .value {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-weight: 700;
+    font-size: .95rem;
+    overflow-wrap: anywhere;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="card p-3 mb-3">
+  <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <div>
+      <h5 class="mb-1">Specific summary</h5>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+      <a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Home</a>
+      <a class="btn btn-outline-secondary" href="{{ url_for('queue_page') }}">Queue</a>
+      <a class="btn btn-outline-secondary" href="{{ url_for('history') }}">History</a>
+    </div>
+  </div>
+
+  <form class="mt-3" method="get" action="{{ url_for('specific_summary_page') }}">
+    <div class="row g-2 align-items-end">
+      <div class="col-lg-10">
+        <label class="form-label small-muted mb-1">Results folder</label>
+        <input class="form-control mono" name="out_dir" value="{{ out_dir }}" />
+        <div class="small-muted mt-1">Esempio: <span class="mono">results/specific_summary_3min</span></div>
+      </div>
+      <div class="col-lg-2 d-grid">
+        <button class="btn btn-dark" type="submit">Apri</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+{% if error %}
+  <div class="alert alert-danger">{{ error }}</div>
+{% endif %}
+
+{% if payload %}
+
+  <!-- Meta card (top) -->
+  <div class="card p-3 mb-3">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <h6 class="mb-0">General</h6>
+    </div>
+
+    <div class="meta-grid mt-3">
+      <div class="meta-item">
+        <div class="label">generated_at</div>
+        <div class="value">{{ payload.generated_at }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">time_limit_s</div>
+        <div class="value">{{ payload.time_limit_s }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">seed</div>
+        <div class="value">{{ payload.seed }}</div>
+      </div>
+
+      <div class="meta-item">
+        <div class="label">classes</div>
+        <div class="value">{{ payload.selected_classes }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">instances</div>
+        <div class="value">{{ payload.selected_instance_ids }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">rows raw</div>
+        <div class="value">{{ payload.kpi.n_rows_raw }}</div>
+      </div>
+
+      <div class="meta-item">
+        <div class="label">#classes</div>
+        <div class="value">{{ payload.kpi.n_classes }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">#instances</div>
+        <div class="value">{{ payload.kpi.n_instances }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="label">feasible_rate</div>
+        <div class="value">{{ "%.1f"|format(100*payload.kpi.feasible_rate) }}%</div>
+      </div>
+
+      <div class="meta-item">
+        <div class="label">viol_mean</div>
+        <div class="value">{{ "%.3f"|format(payload.kpi.viol_mean) }}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Table card (full width) -->
+  <div class="card p-3 full-width-card">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div>
+        <h5 class="mb-0">Tabella riepilogativa (media max-avg)</h5>
+      </div>
+      <span class="small-muted">stile screenshot</span>
+    </div>
+
+    {% if payload.table and payload.table.rows and payload.table.columns %}
+      <div class="table-wrap mt-3">
+        <table class="table summary-table mb-0">
+          <thead>
+            <tr>
+              {% for c in payload.table.columns %}
+                {% if loop.index0 == 0 %}
+                  <th class="sticky-col">CLASSE</th>
+                {% else %}
+                  <th class="colhead">
+                    {{ c }}
+                  </th>
+                {% endif %}
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in payload.table.rows %}
+              <tr>
+                <td class="sticky-col class-cell mono">{{ r["class"] }}</td>
+                {% for c in payload.table.columns[1:] %}
+                  {% set v = r.get(c) %}
+                  <td class="mono text-end">
+                    {% if v is not none %}
+                      {{ "%.2f"|format(v) }}
+                    {% else %}
+                      —
+                    {% endif %}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="small-muted mt-3">Nessun dato tabellare trovato nel JSON.</div>
+    {% endif %}
+  </div>
+
+{% else %}
+  <div class="card p-3">
+    <div class="small-muted">
+      Nessun file trovato. Assicurati che dentro <span class="mono">{{ out_dir }}</span> esista:
+      <span class="mono">specific_summary.json</span>.
+    </div>
+  </div>
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block subtitle %}Aggiungi run in coda dalla Home e avvia il job massivo.{% endblock %}
+{% block topnav %}
+<a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Home</a>
+<a class="btn btn-outline-secondary" href="{{ url_for('grid_page') }}">Grid results</a>
+<a class="btn btn-outline-secondary" href="{{ url_for('compare') }}">Compare</a>
+{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+  <div class="col-lg-4">
+    <div class="card p-3">
+      <div class="d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">Stato</h5>
+        <span class="chip mono" id="q_status">...</span>
+      </div>
+      <div class="small-muted mt-2">current_job: <span class="mono" id="q_current"></span></div>
+      <div class="small-muted">started: <span class="mono" id="q_started"></span></div>
+      <div class="small-muted">ended: <span class="mono" id="q_ended"></span></div>
+      <div id="q_err" class="alert alert-danger mt-2 mb-0" style="display:none"></div>
+
+      <div class="d-flex gap-2 mt-3 flex-wrap">
+        <form method="post" action="{{ url_for('queue_start') }}" class="m-0">
+          <button class="btn btn-dark" type="submit">Avvia coda</button>
+        </form>
+        <form method="post" action="{{ url_for('queue_clear_route') }}" class="m-0">
+          <button class="btn btn-outline-secondary" type="submit">Svuota</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-8">
+    <div class="card p-3 mb-3">
+      <div class="d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">Best max-avg (job corrente)</h5>
+        <span class="small-muted">live</span>
+      </div>
+      <div class="mt-2"><canvas id="chart" height="140"></canvas></div>
+    </div>
+
+    <div class="card p-3">
+      <div class="d-flex justify-content-between align-items-center">
+        <h5 class="mb-0">Jobs</h5>
+        <span class="small-muted" id="q_counts"></span>
+      </div>
+      <div class="table-responsive mt-2">
+        <table class="table table-sm align-middle mb-0" id="jobs_tbl">
+          <thead>
+            <tr>
+              <th>Status</th><th>Algo</th><th>Init</th><th>TL</th><th>Seed</th><th>Istanza</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const ctx = document.getElementById('chart');
+  const chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [{ label: 'best max-avg', data: [], tension: 0.15, pointRadius: 0 }] },
+    options: { animation: false, responsive: true, scales: { x: { title: {display:true, text:'sec'} }, y: { title: {display:true, text:'max-avg'} } } }
+  });
+
+  function renderJobs(jobs){
+    const tbody = document.querySelector('#jobs_tbl tbody');
+    tbody.innerHTML = '';
+    jobs.forEach(j => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><span class="chip mono">${j.status}</span></td>
+        <td><span class="chip mono">${j.algo}</span></td>
+        <td><span class="chip mono">${j.init}</span></td>
+        <td class="mono">${j.time_limit_s}s</td>
+        <td class="mono">${j.seed}</td>
+        <td class="small-muted mono">${j.instance_dir}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function refresh(){
+    fetch("{{ url_for('queue_api') }}")
+      .then(r => r.json())
+      .then(d => {
+        document.getElementById('q_status').textContent = d.status;
+        document.getElementById('q_current').textContent = d.current_job_id || '';
+        document.getElementById('q_started').textContent = d.started_at || '';
+        document.getElementById('q_ended').textContent = d.ended_at || '';
+
+        const errBox = document.getElementById('q_err');
+        if (d.last_error){ errBox.style.display='block'; errBox.textContent = 'Errore: ' + d.last_error; }
+        else { errBox.style.display='none'; }
+
+        const jobs = d.jobs || [];
+        const q = jobs.filter(x => x.status==='queued').length;
+        const dn = jobs.filter(x => x.status==='done').length;
+        const er = jobs.filter(x => x.status==='error').length;
+        document.getElementById('q_counts').textContent = `queued=${q} · done=${dn} · error=${er}`;
+
+        renderJobs(jobs);
+
+        const tr = d.current_trace || [];
+        if (tr.length){
+          chart.data.labels = tr.map(p => Number(p.t).toFixed(1));
+          chart.data.datasets[0].data = tr.map(p => p.max_avg_completion);
+          chart.update();
+        }
+        setTimeout(refresh, 1200);
+      })
+      .catch(() => setTimeout(refresh, 2000));
+  }
+  refresh();
+</script>
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block subtitle %}
+Dettaglio run salvata: <span class="mono">run_{{ run_id }}.json</span>
+{% endblock %}
+
+{% block content %}
+<div class="card p-3">
+  <div class="small-muted mb-2"><b>Istanza:</b> <span class="mono">{{ data.instance_dir }}</span></div>
+  <div class="small-muted mb-2">
+    <b>Algo:</b> <span class="chip mono">{{ data.algo }}</span>
+    <b class="ms-2">Init:</b> <span class="chip mono">{{ data.init }}</span>
+    <b class="ms-2">TL:</b> <span class="chip mono">{{ data.time_limit_s }}</span>s
+    <b class="ms-2">Seed:</b> <span class="chip mono">{{ data.seed }}</span>
+  </div>
+  <div class="small-muted">
+    <b>Best max-avg:</b> <span class="mono">{{ "%.4f"|format(data.best_max_avg_completion) }}</span>
+    <b class="ms-2">Best sum-avg:</b> <span class="mono">{{ "%.4f"|format(data.best_sum_avg_completion) }}</span>
+    <b class="ms-2">Feasible:</b> <span class="mono">{{ data.feasible }}</span>
+    <b class="ms-2">Violation:</b> <span class="mono">{{ data.violation }}</span>
+  </div>
+</div>
+
+<div class="card p-3 mt-3">
+  <h6 class="mb-2">JSON</h6>
+  <pre class="small-muted mb-0" style="white-space: pre-wrap;">{{ data|tojson(indent=2) }}</pre>
+</div>
+{% endblock %}
